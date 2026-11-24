@@ -1,0 +1,182 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>đang xem…</title>
+<!-- XEM TRƯỚC một composition HyperFrames mà không cần render:  tools/peek.sh <index.html> [t1,t2,…]
+     Mỗi ô là composition được tua tới một thời điểm. Thông tin (thời lượng, từng bước của mỗi
+     chuỗi nhân vật, cảnh báo) nằm ở thẻ pre#info dạng JSON. -->
+<style>
+  body { margin: 0; background: #0c1116; font: 13px system-ui, sans-serif; color: #dfe7ec; }
+  #grid { display: grid; gap: 6px; padding: 6px; }
+  .tile { position: relative; overflow: hidden; background: #000; }
+  .tile iframe { border: 0; transform-origin: 0 0; display: block; }
+  .tile span { position: absolute; left: 6px; top: 5px; padding: 1px 7px; border-radius: 4px; background: rgba(0,0,0,.72); font-weight: 600; }
+  #info { display: none; }
+</style>
+<div id="grid"></div>
+<pre id="info"></pre>
+<script type="module">
+const query = new URLSearchParams(location.search);
+const src = query.get('src');
+let columns = +(query.get('cols') || 4), tileWidth = +(query.get('w') || 480);
+// ?mouth=N: thay vì ảnh toàn cảnh rải rác, chụp một DẢI CẬN MIỆNG dày khung của câu nói thứ N — để soát nhép miệng.
+const mouthLine = +(query.get('mouth') || 0);
+const info = { ok: true, warnings: [] };
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Nạp composition vào một iframe và trả về mọi thứ cần để tua nó.
+async function loadComposition(frame) {
+  await new Promise((resolve, reject) => { frame.addEventListener('load', resolve, { once: true }); frame.addEventListener('error', reject, { once: true }); frame.src = src; });
+  await wait(150);
+  const win = frame.contentWindow, doc = win.document;
+  const root = doc.querySelector('[data-composition-id]');
+  if (!root) throw new Error('no root element with data-composition-id');
+  const id = root.dataset.compositionId, timeline = (win.__timelines || {})[id];
+  if (!timeline) throw new Error(`window.__timelines["${id}"] is missing — the key must equal data-composition-id and the timeline must be built synchronously`);
+  return { win, doc, root, id, timeline, width: +root.dataset.width || 1920, height: +root.dataset.height || 1080, declared: +root.dataset.duration || 0 };
+}
+
+// Tua tới `time`. Bộ dựng thật ẩn/hiện các .clip theo data-start/data-duration; ở đây làm lại đúng việc đó.
+function seek(comp, time) {
+  comp.timeline.pause();
+  comp.timeline.totalTime(time, false);
+  for (const clip of comp.doc.querySelectorAll('.clip[data-start]')) {
+    const start = +clip.dataset.start, duration = +clip.dataset.duration;
+    clip.style.visibility = time >= start && (!Number.isFinite(duration) || time < start + duration) ? '' : 'hidden';
+  }
+}
+
+try {
+  if (!src) throw new Error('missing ?src= parameter');
+  const probeFrame = document.createElement('iframe');
+  probeFrame.style.cssText = 'position:absolute;left:-99999px;width:10px;height:10px';
+  document.body.appendChild(probeFrame);
+  const probe = await loadComposition(probeFrame);
+  const timelineDuration = +probe.timeline.duration().toFixed(3);
+  Object.assign(info, { composition: probe.id, width: probe.width, height: probe.height, declaredDuration: probe.declared, timelineDuration });
+  if (timelineDuration > probe.declared + 0.01)
+    info.warnings.push(`the timeline is ${timelineDuration}s long but data-duration is ${probe.declared}s — everything after ${probe.declared}s is cut`);
+
+  // Các chuỗi nhân vật (kichBan gắn sẵn nhãn vào timeline con).
+  info.sequences = probe.timeline.getChildren(true, false, true).filter((child) => child.data && child.data.type === 'character-sequence').map((child) => {
+    const start = +child.startTime().toFixed(3), end = +(child.startTime() + child.duration()).toFixed(3);
+    if (end > probe.declared + 0.01) info.warnings.push(`the sequence of "${child.data.character}" ends at ${end}s, after data-duration ${probe.declared}s`);
+    return { character: child.data.character, start, end,
+             steps: child.data.steps.map((step) => ({ name: step.name, start: +(start + step.start).toFixed(2), end: +(start + step.start + step.duration).toFixed(2), ...(step.sound ? { sound: step.sound } : {}), ...(step.cues ? { cues: step.cues } : {}) })) };
+  });
+  // Hai nhân vật NÓI chồng lên nhau: gần như luôn là lỗi dàn cảnh, mà nhìn ảnh tĩnh không thấy.
+  // Bước nói kéo dài hơn TIẾNG NÓI 0,55 giây (miệng đã khép, tay đang về chỗ) — phần đuôi ấy không
+  // tính là "đang nói", nếu không hai câu nối sát nhau bị báo chồng oan.
+  const SETTLE = 0.55;
+  const speech = info.sequences.flatMap((seq) => seq.steps.filter((step) => ['speak', 'explain', 'speakCues'].includes(step.name)).map((step) => ({ ...step, end: Math.max(step.start, step.end - SETTLE), who: seq.character })));
+  for (let a = 0; a < speech.length; a++) for (let b = a + 1; b < speech.length; b++) {
+    const overlap = Math.min(speech[a].end, speech[b].end) - Math.max(speech[a].start, speech[b].start);
+    if (speech[a].who !== speech[b].who && overlap > 0.15)
+      info.warnings.push(`"${speech[a].who}" and "${speech[b].who}" speak at the same time for ${overlap.toFixed(1)}s (around ${Math.max(speech[a].start, speech[b].start).toFixed(1)}s)`);
+  }
+  // TIẾNG phải khớp MIỆNG: mỗi bước `speakCues` cần một <audio> bắt đầu đúng lúc và dài bằng tiếng nói
+  // (bước dài hơn tiếng 0,55 s). Xem ảnh tĩnh thì không thể thấy tiếng lệch — nên soát bằng số.
+  {
+    const fileOf = (path) => (path || '').split(/[\\/]/).pop().split('?')[0];
+    const clips = [...probe.doc.querySelectorAll('audio[data-start]:not([data-role="music"])')].map((clip) => ({ id: clip.id || clip.getAttribute('src') || 'audio', file: fileOf(clip.getAttribute('src')), start: +clip.dataset.start, duration: +clip.dataset.duration, used: false }));
+    const lines = info.sequences.flatMap((seq) => seq.steps.filter((step) => step.name === 'speakCues').map((step) => ({ who: seq.character, start: step.start, length: Math.max(0, step.end - step.start - 0.55), sound: step.sound })));
+    for (const line of lines) {
+      // Ghép theo TÊN TỆP TIẾNG mà bộ cue được tạo ra từ đó; chỉ khi không biết tên mới ghép theo giờ gần nhất
+      // (ghép theo giờ thì sau một lần sửa làm lệch giờ, clip của người này bị gán cho câu của người kia).
+      const free = clips.filter((item) => !item.used);
+      const named = line.sound ? free.find((item) => item.file === line.sound) : null;
+      const clip = named || (line.sound && free.some((item) => item.file) ? null : free.sort((a, b) => Math.abs(a.start - line.start) - Math.abs(b.start - line.start))[0]);
+      const paste = `<audio${line.sound ? ` src="${line.sound}"` : ''} data-start="${line.start.toFixed(2)}" data-duration="${line.length.toFixed(2)}">`;
+      if (!clip || (!named && Math.abs(clip.start - line.start) > 1.5)) { info.warnings.push(`"${line.who}" lip-syncs at ${line.start.toFixed(2)}s but no <audio> clip starts near it — add ${paste}`); continue; }
+      clip.used = true;
+      if (Math.abs(clip.start - line.start) > 0.06) info.warnings.push(`#${clip.id} starts at ${clip.start}s but "${line.who}" starts lip-syncing at ${line.start.toFixed(2)}s — the voice will be ${Math.abs(clip.start - line.start).toFixed(2)}s ${clip.start > line.start ? 'late' : 'early'}; set data-start="${line.start.toFixed(2)}"`);
+      if (Number.isFinite(clip.duration) && Math.abs(clip.duration - line.length) > 0.2) info.warnings.push(`#${clip.id} has data-duration ${clip.duration}s but its cues are ${line.length.toFixed(2)}s long — set data-duration="${line.length.toFixed(2)}" (or remake the cues if the audio changed)`);
+    }
+    if (lines.length) for (const clip of clips.filter((item) => !item.used)) info.warnings.push(`#${clip.id} (starts at ${clip.start}s) has no speakCues step — nobody's mouth moves to it`);
+  }
+  // Nhân vật mở đầu bằng `enter` phải ở NGOÀI khung lúc bắt đầu; host đặt gần mép quá thì cái đầu
+  // (to hơn thân nhiều) đã ló vào khung từ khung hình đầu tiên.
+  for (const child of probe.timeline.getChildren(true, false, true).filter((item) => item.data && item.data.type === 'character-sequence' && item.data.rig)) {
+    const first = child.data.steps[0];
+    if (!first || first.name !== 'enter' || !child.data.rig.el || !child.data.rig.el.dau) continue;
+    seek(probe, child.startTime() + first.start + 0.001);
+    const head = child.data.rig.el.dau.getBoundingClientRect(), stage = probe.root.getBoundingClientRect();
+    const inside = Math.min(head.right, stage.right) - Math.max(head.left, stage.left);
+    // Cần dời bao xa: tới khi cả cái đầu ra khỏi mép mà nhân vật bước vào từ đó.
+    const fromLeft = (head.left + head.right) / 2 < (stage.left + stage.right) / 2;
+    const move = Math.ceil((fromLeft ? head.right - stage.left : stage.right - head.left) + 20);
+    if (inside > 4) info.warnings.push(`"${child.data.character}" starts its entrance with ${Math.round(inside)}px of its head already inside the frame at ${(child.startTime() + first.start).toFixed(1)}s — move its host ${move}px toward the ${fromLeft ? 'left' : 'right'} edge and walk to the mark after 'enter', or cover the start`);
+  }
+  // `face(target)` chọn bên trái / phải LÚC DỰNG timeline. Nếu về sau người kia (hoặc chính mình) đi sang
+  // phía bên kia thì nhân vật đang quay lưng lại người mình nói chuyện — soát từng quãng giữ hướng.
+  for (const child of probe.timeline.getChildren(true, false, true).filter((item) => item.data && item.data.type === 'character-sequence' && item.data.rig)) {
+    const { rig, steps, character } = child.data, base = child.startTime();
+    steps.forEach((step, index) => {
+      if (step.name !== 'face' || !step.target) return;
+      const next = steps.slice(index + 1).find((later) => later.name === 'face' || later.name === 'exit' || later.name === 'walkAway');
+      const from = base + step.start + step.duration, to = Math.min(next ? base + next.start : base + child.duration(), probe.declared || Infinity);
+      const who = step.target.publicId ? `"${step.target.publicId}"` : `#${step.target.id || 'element'}`;
+      for (let time = from; time <= to; time += 0.25) {
+        seek(probe, time);
+        const facing = rig.state.facing, box = step.target.getBoundingClientRect ? step.target.getBoundingClientRect() : null;
+        const gap = (typeof step.target.centerX === 'function' ? step.target.centerX() : box.left + box.width / 2) - rig.centerX();
+        if (facing && Math.abs(gap) > 20 && Math.sign(gap) !== Math.sign(facing)) {
+          info.warnings.push(`"${character}" turned to face ${who} at ${(base + step.start).toFixed(1)}s, but at ${time.toFixed(1)}s ${who} is on the other side — add another face step after the move`);
+          break;
+        }
+      }
+    });
+  }
+  for (const clip of probe.doc.querySelectorAll('.clip[data-start]')) {
+    const end = +clip.dataset.start + +clip.dataset.duration;
+    if (end > probe.declared + 0.01) info.warnings.push(`clip #${clip.id || clip.tagName.toLowerCase()} ends at ${end}s, after data-duration`);
+  }
+  probeFrame.remove();
+
+  // Thời điểm cần xem: do người gọi đưa, hoặc 8 điểm rải đều.
+  const total = probe.declared || timelineDuration;
+  const times = (query.get('t') || '').split(',').map(Number).filter((n) => Number.isFinite(n) && query.get('t'));
+  // Mặc định: khung 0 (để thấy cảnh mở đầu) rồi 7 điểm rải đều.
+  if (!times.length) { times.push(0); for (let i = 0; i < 7; i++) times.push(+(total * (i + 1) / 7.5).toFixed(2)); }
+  // Dải cận miệng: 10 khung mỗi giây suốt câu nói (tối đa 40 khung), ô nhỏ, 10 ô một hàng.
+  let mouth = null;
+  if (mouthLine) {
+    const spoken = info.sequences.flatMap((seq, index) => seq.steps.filter((step) => ['speak', 'explain', 'speakCues'].includes(step.name)).map((step) => ({ ...step, who: seq.character, index }))).sort((a, b) => a.start - b.start);
+    mouth = spoken[mouthLine - 1];
+    if (!mouth) throw new Error(`--mouth=${mouthLine}: the composition has ${spoken.length} spoken line(s)`);
+    const until = mouth.end - 0.45, count = Math.min(40, Math.max(2, Math.round((until - mouth.start) * 10)));
+    times.length = 0;
+    for (let i = 0; i < count; i++) times.push(+(mouth.start + (until - mouth.start) * i / (count - 1)).toFixed(2));
+    columns = 10; tileWidth = 150;
+    const shapeAt = (time) => { const cue = (mouth.cues || []).find((item) => time - mouth.start >= item.start && time - mouth.start < item.end); return cue ? cue.value : ''; };
+    info.mouth = { who: mouth.who, line: mouthLine, start: mouth.start, end: +until.toFixed(2), frames: count, shapes: mouth.cues ? times.map(shapeAt).join('') : null };
+    mouth.shapeAt = shapeAt;
+  }
+  info.times = times;
+
+  const scale = tileWidth / probe.width, tileHeight = mouth ? 105 : Math.round(probe.height * scale);
+  const grid = document.getElementById('grid');
+  grid.style.gridTemplateColumns = `repeat(${Math.min(columns, times.length)}, ${tileWidth}px)`;
+  info.sheet = { width: Math.min(columns, times.length) * (tileWidth + 6) + 6, height: Math.ceil(times.length / columns) * (tileHeight + 6) + 6 };
+  await Promise.all(times.map(async (time) => {
+    const tile = document.createElement('div'); tile.className = 'tile'; tile.style.cssText = `width:${tileWidth}px;height:${tileHeight}px`;
+    const frame = document.createElement('iframe'); frame.style.cssText = `width:${probe.width}px;height:${probe.height}px;transform:scale(${scale})`;
+    const label = document.createElement('span'); label.textContent = time.toFixed(2) + ' s' + (mouth && mouth.shapeAt(time) ? ' · ' + mouth.shapeAt(time) : '');
+    tile.append(frame, label); grid.appendChild(tile);
+    const comp = await loadComposition(frame);
+    seek(comp, time);
+    if (mouth) {
+      // Cắt quanh miệng: lấy hai mắt làm mốc (miệng nằm dưới mắt khoảng 0,7 lần khoảng cách hai mắt), tính trên
+      // hình ĐÃ qua máy quay, rồi phóng iframe sao cho vùng ấy lấp đầy ô.
+      const rig = comp.timeline.getChildren(true, false, true).filter((item) => item.data && item.data.type === 'character-sequence')[mouth.index].data.rig;
+      const left = rig.el.matL.getBoundingClientRect(), right = rig.el.matR.getBoundingClientRect();
+      const eyeX = (left.left + left.right + right.left + right.right) / 4, eyeY = (left.top + left.bottom + right.top + right.bottom) / 4;
+      const gap = Math.abs((right.left + right.right) / 2 - (left.left + left.right) / 2) || 40;
+      const width = gap * 2.3, zoom = tileWidth / width;
+      frame.style.transform = `translate(${-(eyeX - width / 2) * zoom}px, ${-(eyeY - gap * 0.1) * zoom}px) scale(${zoom})`;
+    }
+  }));
+  await wait(120);
+} catch (error) { info.ok = false; info.error = String(error && error.message || error); }
+document.getElementById('info').textContent = JSON.stringify(info);
+document.title = info.ok ? 'DONE' : 'ERROR';
+</script>

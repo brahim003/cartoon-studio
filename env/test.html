@@ -1,0 +1,29 @@
+<!doctype html><html><head><meta charset="utf-8">
+<script type="importmap">{"imports":{"three":"/node_modules/three/build/three.module.js","three/addons/":"/node_modules/three/examples/jsm/"}}</script>
+<style>html,body{margin:0;background:#000}canvas{display:block}</style></head><body>
+<script type="module">
+import * as THREE from 'three';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+const W=1080,H=1920;
+const r=new THREE.WebGLRenderer({antialias:true,preserveDrawingBuffer:true});r.setSize(W,H);r.shadowMap.enabled=true;r.outputColorSpace=THREE.SRGBColorSpace;
+document.body.appendChild(r.domElement);
+const s=new THREE.Scene();
+s.background=new THREE.Color('#f2a35e');s.fog=new THREE.Fog('#f2a35e',25,80);
+s.add(new THREE.HemisphereLight('#ffd9a8','#6a4a5e',1.1));
+const sun=new THREE.DirectionalLight('#ffb36b',2.6);sun.position.set(-18,10,14);sun.castShadow=true;sun.shadow.mapSize.set(2048,2048);
+Object.assign(sun.shadow.camera,{left:-30,right:30,top:30,bottom:-30,near:1,far:80});s.add(sun);
+const ground=new THREE.Mesh(new THREE.PlaneGeometry(200,200),new THREE.MeshLambertMaterial({color:'#7f9b4a'}));ground.rotation.x=-Math.PI/2;ground.receiveShadow=true;s.add(ground);
+const L=new GLTFLoader();
+async function put(path,x,z,ry=0,sc=1){const g=await L.loadAsync(path);const o=g.scene;o.position.set(x,0,z);o.rotation.y=ry;o.scale.setScalar(sc);o.traverse(m=>{if(m.isMesh){m.castShadow=m.receiveShadow=true}});s.add(o);return o}
+const K='/assets/kenney/';
+const jobs=[];
+// castle row
+jobs.push(put(K+'castle-kit/tower-square-base.glb',-4,-10,0,3),put(K+'castle-kit/tower-hexagon-roof.glb',-4,-10,0,3),put(K+'castle-kit/flag-wide.glb',3,-8,0,3),put(K+'castle-kit/siege-catapult.glb',5,-3,-0.6,3));
+// forest
+for(let i=0;i<14;i++){jobs.push(put(K+'mini-forest/tree-high.glb',-12+Math.random()*24,-6-Math.random()*22,Math.random()*6,3))}
+for(let i=0;i<8;i++){jobs.push(put(K+'mini-forest/rocks-low.glb',-10+Math.random()*20,-2-Math.random()*10,Math.random()*6,3))}
+jobs.push(put(K+'pirate-kit/palm-bend.glb',7,2,0,3),put(K+'mini-forest/tent.glb',-6,0,0.5,3));
+await Promise.all(jobs);
+const cam=new THREE.PerspectiveCamera(50,W/H,0.1,200);cam.position.set(0,3.2,12);cam.lookAt(0,2,-8);
+r.render(s,cam);window.__done=true;
+</script></body></html>

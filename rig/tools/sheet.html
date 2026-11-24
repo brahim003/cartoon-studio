@@ -1,0 +1,54 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Pose sheet</title>
+<!-- Bảng tư thế của MỘT nhân vật, để soát bằng mắt:  tools/sheet.html?nv=<id>[&config=0]
+     Hàng 1: đứng yên (toàn thân, cận ngực, cận mặt, hai góc xoay). Các hàng sau: giữa từng động tác.
+     Mặc định áp configs/<id>.json nếu có (đúng nhân vật mà bundle sẽ dựng); &config=0 để bỏ qua. -->
+<script src="../vendor/gsap-3.15.1.min.js"></script>
+<body style="margin:0;background:#1d3a4b;display:flex;flex-wrap:wrap;font:12px system-ui;color:#cfe">
+<script type="module">
+import { RigThu, createCharacter, createPet, seed, sequence } from '../runtime/index.js';
+import { khungMat } from '../studio/params.js';
+seed(1);
+const query = new URLSearchParams(location.search);
+const id = query.get('nv') || 'vet', pet = id in RigThu.LOAI;
+
+// Bộ số đã lưu cho nhân vật này (nếu có và không bị tắt).
+let config = null;
+if (query.get('config') !== '0') {
+  try { const response = await fetch(`../configs/${id}.json`, { cache: 'no-store' }); if (response.ok) config = await response.json(); } catch (error) { /* không có tệp */ }
+}
+
+const panel = (label, pose, viewBox) => {
+  const box = document.createElement('div'); box.style.cssText = 'width:256px;height:300px;outline:1px solid #345;overflow:hidden;position:relative';
+  const host = document.createElement('div'); host.style.cssText = 'width:100%;height:100%'; box.appendChild(host); document.body.appendChild(box);
+  const rig = (pet ? createPet(host, { species: id, config }) : createCharacter(host, { id, config })).rig;
+  if (pose) pose(rig); rig.render(); if (viewBox) rig.svg.setAttribute('viewBox', viewBox(rig));
+  const caption = document.createElement('span'); caption.textContent = label; caption.style.cssText = 'position:absolute;left:5px;top:3px'; box.appendChild(caption);
+};
+const mid = (action, progress = 0.45, ...args) => (rig) => { rig[action](...args).progress(progress); };
+const tag = config ? ' (config)' : '';
+if (pet) {
+  panel('rest' + tag); panel('face', null, (rig) => rig.khungMat(70));
+  for (const action of RigThu.DONG_TAC[RigThu.LOAI[id].loai].slice(1)) panel(action, mid(action, 0.5));
+} else {
+  // Khung cận TÍNH từ tỉ lệ của chính nhân vật (cỡ đầu, cỡ thân, độ dài chân), không đặt cứng:
+  // khung cứng hợp với nhân vật chibi thì cắt mất cằm hoặc tay của nhân vật ít chibi hơn.
+  const faceBox = (rig) => khungMat(rig, 80);
+  // Cận THÂN: từ cằm xuống quá hông — thấy cổ áo, túi, đồ cầm tay và phần trên của váy / tạp dề.
+  // Đầu nằm ngoài khung nên không che nhãn. Khung giữ đúng tỉ lệ của ô (256 × 300).
+  const chestBox = (rig) => { const hip = 262 + 30 + rig.hangChan(), top = hip - 118 * rig.nv.coThan, height = 118 * rig.nv.coThan + 70, width = height * 256 / 300; return `${200 - width / 2} ${top} ${width} ${height}`; };
+  panel('rest' + tag); panel('torso close-up', null, chestBox); panel('face close-up', null, faceBox);
+  panel('turned 50%', (rig) => { rig.state.facing = 0.5; }); panel('turned 100%', (rig) => { rig.state.facing = 1; });
+  for (const [action, progress, ...args] of [['wave', 0.4], ['thumbsUp', 0.45], ['present', 0.4], ['explain', 0.45, 'xin chào bạn nhé', 2.4], ['shrug', 0.4],
+                                             ['walk', 0.5], ['march', 0.3], ['point', 0.5, { x: 40, y: 230 }], ['worry', 0.5], ['sit', 0.5], ['cheer', 0.4], ['drink', 0.4], ['stroke', 0.45], ['write', 0.5],
+                                             ['express', 0.5, 'happy'], ['express', 0.5, 'sad'], ['express', 0.5, 'surprised'], ['express', 0.5, 'angry'], ['turn', 0.5, 'left']])
+
+    panel(action === 'express' ? `express: ${args[0]}` : action === 'turn' ? `turn: ${args[0]}` : action, mid(action, progress, ...args));
+  // Thế đứng giữ nguyên: nói khi đang ngồi, và quay mặt về một phía rồi vẫy.
+  const held = (steps, time) => (rig) => { const t = sequence(rig, steps); t.time(time); };
+  panel('sitDown → explain', held([['sitDown'], ['explain', 'xin chào bạn nhé', 2.4]], 2));
+  panel('face left → wave', held([['face', 'left'], ['wave']], 1.2));
+}
+document.title = 'DONE';
+</script>
